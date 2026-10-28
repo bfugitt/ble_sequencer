@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Step Sequencer</title>
+<style>
+  :root {
+    --bg: #eef1f7;
+    --panel: #ffffff;
+    --line: #d3d9e8;
+    --ink: #1d2748;
+    --muted: #55608a;
+    --accent: #2f4bd0;
+    --focus: #ff7a00;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Nunito", "Avenir Next", "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    line-height: 1.4;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 1.8rem; margin: 0; }
+  .lede { color: var(--muted); margin: 4px 0 18px; max-width: 62ch; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .panel h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  .panel p.note { color: var(--muted); font-size: .9rem; margin: 0 0 10px; max-width: 70ch; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: flex-end; }
+  .stack { display: flex; flex-direction: column; gap: 12px; }
+  label.field {
+    display: flex; flex-direction: column; gap: 4px;
+    font-size: .85rem; color: var(--muted); font-weight: 700;
+  }
+  .inline { display: flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 600; }
+  .inline output { min-width: 3ch; text-align: right; }
+  select, input[type=number] {
+    font: inherit; color: var(--ink);
+    padding: 8px 10px; min-height: 42px;
+    border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  }
+  input[type=number] { width: 90px; }
+  input[type=range] { width: 170px; accent-color: var(--accent); height: 28px; }
+  input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); }
+  .check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .btn {
+    font: inherit; font-weight: 700; color: var(--ink);
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 18px; min-height: 44px; cursor: pointer;
+  }
+  .btn:hover { background: #f4f6fc; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; min-width: 120px; font-size: 1.05rem; }
+  .btn.primary:hover { background: #2640b8; }
+  .btn.primary.running { background: var(--ink); border-color: var(--ink); }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+  .gridscroll { overflow-x: auto; padding: 2px; }
+  .seq {
+    display: grid;
+    grid-template-columns: 58px repeat(16, minmax(34px, 1fr));
+    gap: 5px;
+    min-width: 720px;
+  }
+  .stephead { text-align: center; font-size: .75rem; color: var(--muted); border-radius: 6px; padding: 2px 0; }
+  .stephead.beat { font-weight: 800; color: var(--ink); }
+  .stephead.now { background: var(--ink); color: #fff; }
+  .rowlabel {
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: .85rem;
+    border-radius: 8px; background: var(--off); border-left: 6px solid var(--on);
+  }
+  .cell {
+    height: 44px; padding: 0; border: 0; border-radius: 8px;
+    background: var(--off); cursor: pointer;
+  }
+  .cell.beat { background: var(--off2); }
+  .cell[aria-pressed="true"] { background: var(--on); box-shadow: inset 0 -3px 0 rgba(0,0,0,.2); }
+  .cell.now { box-shadow: inset 0 0 0 3px var(--ink); }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
+  .cols .panel { margin-bottom: 0; }
+  .status { margin: 12px 0 0; font-weight: 600; }
+  .status.bad { color: #b3261e; }
+  .status.good { color: #17703a; }
+  details { margin-top: 12px; color: var(--muted); font-size: .92rem; }
+  details summary { cursor: pointer; font-weight: 700; color: var(--ink); }
+  details ul { margin: 8px 0 0; padding-left: 20px; }
+  details li { margin-bottom: 6px; }
+
+  .monitor {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: .85rem;
+    background: #f6f8fd; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; min-height: 236px; overflow: hidden;
+  }
+  .monitor div { white-space: pre; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; }
+  .monitor .on { color: #1f3bb3; }
+  .monitor .off { color: #7a84a8; }
+  .monitor .pc { color: #8a3a00; }
+  .monitor .empty { color: #7a84a8; font-style: italic; white-space: normal; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Step Sequencer</h1>
+    <p class="lede">Click squares to build a pattern, then press Play. Each row is a note and each column is one step in time. The space bar also starts and stops.</p>
+  </header>
+
+  <section class="panel" aria-label="Playback">
+    <div class="row">
+      <button id="play" class="btn primary" type="button">Play</button>
+      <label class="field" for="tempo">Tempo
+        <span class="inline">
+          <input id="tempo" type="range" min="60" max="180" value="100">
+          <output id="tempoOut" for="tempo">100</output> BPM
+        </span>
+      </label>
+      <button id="clear" class="btn" type="button">Clear</button>
+      <button id="random" class="btn" type="button">Surprise me</button>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Note grid">
+    <div class="gridscroll">
+      <div id="seq" class="seq" role="group" aria-label="Note grid. Use arrow keys to move and Enter to toggle a step."></div>
+    </div>
+  </section>
+
+  <div class="cols">
+
+    <section class="panel" aria-label="Notes">
+      <h2>Notes</h2>
+      <div class="stack">
+        <div class="row">
+          <label class="field" for="scale">Scale
+            <select id="scale"></select>
+          </label>
+          <label class="field" for="key">Key
+            <select id="key"></select>
+          </label>
+          <label class="field" for="octave">Octave
+            <select id="octave"></select>
+          </label>
+        </div>
+        <p class="note">Changing the scale keeps your pattern but changes which notes it plays.</p>
+        <label class="field" for="gate">Note length
+          <span class="inline"><input id="gate" type="range" min="20" max="95" value="70"><output id="gateOut" for="gate">70</output>%</span>
+        </label>
+        <label class="field" for="vel">Loudness (velocity)
+          <span class="inline"><input id="vel" type="range" min="30" max="127" value="100"><output id="velOut" for="vel">100</output></span>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Sound output">
+      <h2>Where the sound goes</h2>
+      <div class="stack">
+        <div class="row">
+          <label class="field" for="out">Output
+            <select id="out"><option value="builtin">This computer's speaker</option></select>
+          </label>
+          <button id="connect" class="btn" type="button">Connect MIDI devices</button>
+        </div>
+        <label class="check" for="alsoBuiltin">
+          <input id="alsoBuiltin" type="checkbox" checked disabled>
+          Play on this computer's speaker too
+        </label>
+        <div class="row">
+          <label class="field" for="channel">MIDI channel
+            <select id="channel"></select>
+          </label>
+          <label class="field" for="patch">Patch number
+            <input id="patch" type="number" min="1" max="128" value="1">
+          </label>
+          <button id="sendPatch" class="btn" type="button" disabled>Send patch</button>
+        </div>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite">Playing through this computer's speaker. Press Connect to send notes to a synth.</p>
+      <details>
+        <summary>Synth not showing up?</summary>
+        <ul>
+          <li>Use Chrome or Edge. Safari does not support Web MIDI.</li>
+          <li>Turn the synth on first, then press Connect and allow the MIDI permission.</li>
+          <li>USB-connected synths show up on most computers. For Bluetooth, pair the synth with the computer first (on a Mac, use Audio MIDI Setup, then Bluetooth). Some systems do not share Bluetooth MIDI devices with the browser.</li>
+          <li>Connected but silent? Make sure the MIDI channel matches the synth. Try channel 1, then 2.</li>
+          <li>Patch number sends a Program Change message. Not every synth responds to it.</li>
+        </ul>
+      </details>
+    </section>
+
+  </div>
+
+  <section class="panel" aria-label="MIDI messages" style="margin-top:14px">
+    <h2>MIDI messages</h2>
+    <p class="note">Every note is a short message: a status byte (what to do, and on which channel), a note number, and a velocity (how hard). A synth receives these same bytes over USB or Bluetooth. Messages show here even when you are using the built-in sound.</p>
+    <label class="check" for="showOff" style="margin-bottom:10px">
+      <input id="showOff" type="checkbox">
+      Also show Note Off messages
+    </label>
+    <div id="monitor" class="monitor" aria-live="off">
+      <div class="empty">Press Play to see messages.</div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const STEPS = 16, ROWS = 8;
+  const LOOKAHEAD = 120;   // ms: how far ahead notes are handed to MIDI / audio
+  const TICK = 25;         // ms: how often the scheduler wakes up
+  const MAX_LOG_LINES = 9;
+
+  const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  // Hue per pitch class, loosely following the classroom Boomwhacker colors
+  const HUES = [0, 18, 32, 46, 54, 130, 160, 205, 235, 268, 298, 328];
+  const SCALES = {
+    'Major pentatonic': [0, 2, 4, 7, 9],
+    'Minor pentatonic': [0, 3, 5, 7, 10],
+    'Major':            [0, 2, 4, 5, 7, 9, 11],
+    'Natural minor':    [0, 2, 3, 5, 7, 8, 10],
+    'Blues':            [0, 3, 5, 6, 7, 10]
+  };
+
+  const $ = id => document.getElementById(id);
+  const playBtn = $('play'), tempo = $('tempo'), tempoOut = $('tempoOut');
+  const scaleSel = $('scale'), keySel = $('key'), octSel = $('octave');
+  const gate = $('gate'), gateOut = $('gateOut'), vel = $('vel'), velOut = $('velOut');
+  const outSel = $('out'), connectBtn = $('connect'), alsoBuiltin = $('alsoBuiltin');
+  const chSel = $('channel'), patchIn = $('patch'), patchBtn = $('sendPatch');
+  const statusEl = $('status'), monitor = $('monitor'), showOff = $('showOff');
+  const seq = $('seq');
+
+  // ---------- Setup controls ----------
+  Object.keys(SCALES).forEach(name => scaleSel.add(new Option(name, name)));
+  NOTE_NAMES.forEach((n, i) => keySel.add(new Option(n, i)));
+  for (let o = 2; o <= 6; o++) octSel.add(new Option(String(o), o));
+  octSel.value = '4';
+  for (let c = 1; c <= 16; c++) chSel.add(new Option(String(c), c));
+
+  // ---------- Build grid ----------
+  const grid = Array.from({ length: ROWS }, () => Array(STEPS).fill(false));
+  const cells = Array.from({ length: ROWS }, () => []);
+  const rowLabels = [];
+  const heads = [];
+
+  seq.appendChild(document.createElement('div'));
+  for (let s = 0; s < STEPS; s++) {
+    const h = document.createElement('div');
+    h.className = 'stephead' + (s % 4 === 0 ? ' beat' : '');
+    h.textContent = s + 1;
+    heads.push(h);
+    seq.appendChild(h);
+  }
+  for (let r = ROWS - 1; r >= 0; r--) {
+    const lab = document.createElement('div');
+    lab.className = 'rowlabel';
+    rowLabels[r] = lab;
+    seq.appendChild(lab);
+    for (let s = 0; s < STEPS; s++) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cell' + (s % 4 === 0 ? ' beat' : '');
+      b.setAttribute('aria-pressed', 'false');
+      b.dataset.r = r;
+      b.dataset.s = s;
+      b.tabIndex = -1;
+      cells[r][s] = b;
+      seq.appendChild(b);
+    }
+  }
+  cells[ROWS - 1][0].tabIndex = 0;
+
+  function noteName(n) { return NOTE_NAMES[n % 12] + (Math.floor(n / 12) - 1); }
+
+  function rowNote(r) {
+    const sc = SCALES[scaleSel.value];
+    const root = 12 * (Number(octSel.value) + 1) + Number(keySel.value);
+    return root + 12 * Math.floor(r / sc.length) + sc[r % sc.length];
+  }
+
+  function updateRows() {
+    for (let r = 0; r < ROWS; r++) {
+      const n = rowNote(r);
+      const hue = HUES[n % 12];
+      const on = `hsl(${hue} 72% 52%)`;
+      const off = `hsl(${hue} 45% 94%)`;
+      const off2 = `hsl(${hue} 42% 88%)`;
+      const els = [rowLabels[r], ...cells[r]];
+      els.forEach(el => {
+        el.style.setProperty('--on', on);
+        el.style.setProperty('--off', off);
+        el.style.setProperty('--off2', off2);
+      });
+      rowLabels[r].textContent = noteName(n);
+      for (let s = 0; s < STEPS; s++) {
+        cells[r][s].setAttribute('aria-label', `${noteName(n)}, step ${s + 1}`);
+      }
+    }
+  }
+
+  function setCell(r, s, on) {
+    grid[r][s] = on;
+    cells[r][s].setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+
+  // Starter pattern so Play makes sound right away
+  [4, -1, 2, -1, 3, -1, 1, -1, 2, -1, 4, -1, 5, -1, 3, -1].forEach((r, s) => { if (r >= 0) setCell(r, s, true); });
+  setCell(0, 0, true);
+  setCell(0, 8, true);
+  updateRows();
+
+  // ---------- Built-in sound (Web Audio) ----------
+  let ac = null;
+  function ensureAudio() {
+    if (!ac) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ac = new AC();
+    }
+    if (ac.state === 'suspended') ac.resume();
+    return ac;
+  }
+
+  function beep(n, v, tMs, lenMs) {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    const t = ctx.currentTime + Math.max(0, tMs - performance.now()) / 1000;
+    const dur = Math.max(0.03, lenMs / 1000);
+    const peak = 0.28 * (v / 127);
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = 440 * Math.pow(2, (n - 69) / 12);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + 0.008);
+    g.gain.setValueAtTime(peak, t + dur);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.12);
+    osc.connect(g).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + dur + 0.15);
+  }
+
+  // ---------- MIDI ----------
+  let midi = null;
+  let currentOut = null;
+  let currentOutId = 'builtin';
+  const sounding = new Set();
+  const usedChannels = new Set();
+
+  const hex = bytes => bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+
+  function sendMidi(bytes, tMs) {
+    if (!currentOut) return;
+    try { currentOut.send(bytes, tMs); } catch (e) { /* port may have been unplugged */ }
+  }
+
+  function panic() {
+    if (!currentOut) { sounding.clear(); usedChannels.clear(); return; }
+    const flush = t => {
+      sounding.forEach(k => {
+        const [ch, n] = k.split(':').map(Number);
+        sendMidi([0x80 | ch, n, 0], t);
+      });
+      usedChannels.forEach(ch => sendMidi([0xB0 | ch, 123, 0], t)); // All Notes Off
+    };
+    flush(0);                                          // right now
+    flush(performance.now() + LOOKAHEAD + 20);         // catches anything already queued
+    sounding.clear();
+    usedChannels.clear();
+  }
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg;
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function builtinOn() { return !currentOut || alsoBuiltin.checked; }
+
+  function applyOutput() {
+    const id = outSel.value;
+    if (id === currentOutId) return;
+    panic();
+    currentOutId = id;
+    currentOut = (id !== 'builtin' && midi) ? (midi.outputs.get(id) || null) : null;
+    if (!currentOut && id !== 'builtin') { outSel.value = 'builtin'; currentOutId = 'builtin'; }
+    alsoBuiltin.disabled = !currentOut;
+    if (!currentOut) alsoBuiltin.checked = true;
+    patchBtn.disabled = !currentOut;
+    setStatus(currentOut
+      ? `Sending notes to ${currentOut.name}.`
+      : "Playing through this computer's speaker.", currentOut ? 'good' : '');
+  }
+
+  function refreshOutputs() {
+    if (!midi) return;
+    const prev = outSel.value;
+    outSel.innerHTML = '';
+    outSel.add(new Option("This computer's speaker", 'builtin'));
+    midi.outputs.forEach(o => outSel.add(new Option(o.name || 'MIDI output', o.id)));
+    outSel.value = [...outSel.options].some(o => o.value === prev) ? prev : 'builtin';
+    // If the active port vanished, applyOutput will fall back to built-in sound
+    if (currentOutId !== 'builtin' && outSel.value === 'builtin') currentOutId = '__lost__';
+    applyOutput();
+    if (midi.outputs.size === 0) {
+      setStatus('MIDI is connected, but no MIDI outputs were found. Turn on your synth, plug it in or pair it, then try again.', 'bad');
+    } else if (!currentOut) {
+      setStatus(`Found ${midi.outputs.size} MIDI output${midi.outputs.size > 1 ? 's' : ''}. Choose one under Output.`, 'good');
+    }
+  }
+
+  async function connectMidi() {
+    if (!navigator.requestMIDIAccess) {
+      setStatus('This browser does not support Web MIDI. Open this page in Chrome or Edge.', 'bad');
+      return;
+    }
+    try {
+      midi = await navigator.requestMIDIAccess({ sysex: false });
+    } catch (e) {
+      setStatus('MIDI access was blocked. Click the icon at the left of the address bar, allow MIDI, then press Connect again.', 'bad');
+      return;
+    }
+    midi.onstatechange = refreshOutputs;
+    refreshOutputs();
+  }
+
+  // ---------- MIDI monitor ----------
+  function addLine(text, cls) {
+    const empty = monitor.querySelector('.empty');
+    if (empty) empty.remove();
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    monitor.insertBefore(d, monitor.firstChild);
+    while (monitor.children.length > MAX_LOG_LINES) monitor.removeChild(monitor.lastChild);
+  }
+
+  function logNote(kind, ch, n, v) {
+    if (kind === 'off' && !showOff.checked) return;
+    const status = (kind === 'on' ? 0x90 : 0x80) | ch;
+    const label = kind === 'on' ? 'Note On ' : 'Note Off';
+    const line = `${label}  ch ${String(ch + 1).padStart(2)}  ${noteName(n).padEnd(3)} (${String(n).padStart(3)})  vel ${String(v).padStart(3)}   bytes: ${hex([status, n, v])}`;
+    addLine(line, kind);
+  }
+
+  // ---------- Scheduler ----------
+  let playing = false, step = 0, nextTime = 0, timer = null, runId = 0, lastShown = -1;
+
+  const stepMs = () => 60000 / Number(tempo.value) / 4;   // 16th notes
+
+  function later(tMs, fn, run) {
+    setTimeout(() => { if (run === runId) fn(); }, Math.max(0, tMs - performance.now()));
+  }
+
+  function playNote(n, tMs, lenMs) {
+    const v = Number(vel.value);
+    const ch = Number(chSel.value) - 1;
+    const run = runId;
+    if (currentOut) {
+      sendMidi([0x90 | ch, n, v], tMs);
+      sendMidi([0x80 | ch, n, 0], tMs + lenMs);
+      sounding.add(ch + ':' + n);
+      usedChannels.add(ch);
+    }
+    if (builtinOn()) beep(n, v, tMs, lenMs);
+    later(tMs, () => logNote('on', ch, n, v), run);
+    later(tMs + lenMs, () => logNote('off', ch, n, 0), run);
+  }
+
+  function showStep(s) {
+    if (lastShown >= 0) {
+      heads[lastShown].classList.remove('now');
+      for (let r = 0; r < ROWS; r++) cells[r][lastShown].classList.remove('now');
+    }
+    lastShown = s;
+    if (s >= 0) {
+      heads[s].classList.add('now');
+      for (let r = 0; r < ROWS; r++) cells[r][s].classList.add('now');
+    }
+  }
+
+  function scheduleStep(s, tMs) {
+    const run = runId;
+    later(tMs, () => showStep(s), run);
+    const len = stepMs() * Number(gate.value) / 100;
+    for (let r = 0; r < ROWS; r++) {
+      if (grid[r][s]) playNote(rowNote(r), tMs, len);
+    }
+  }
+
+  function scheduler() {
+    const horizon = performance.now() + LOOKAHEAD;
+    while (nextTime < horizon) {
+      scheduleStep(step, nextTime);
+      step = (step + 1) % STEPS;
+      nextTime += stepMs();
+    }
+  }
+
+  function start() {
+    ensureAudio();
+    playing = true;
+    runId++;
+    step = 0;
+    nextTime = performance.now() + 60;
+    timer = setInterval(scheduler, TICK);
+    scheduler();
+    playBtn.textContent = 'Stop';
+    playBtn.classList.add('running');
+  }
+
+  function stop() {
+    playing = false;
+    clearInterval(timer);
+    runId++;
+    showStep(-1);
+    panic();
+    playBtn.textContent = 'Play';
+    playBtn.classList.remove('running');
+  }
+
+  const togglePlay = () => (playing ? stop() : start());
+
+  // ---------- Events ----------
+  playBtn.addEventListener('click', togglePlay);
+
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' && e.target === document.body) {
+      e.preventDefault();
+      togglePlay();
+    }
+  });
+
+  seq.addEventListener('click', e => {
+    const b = e.target.closest('.cell');
+    if (!b) return;
+    const r = Number(b.dataset.r), s = Number(b.dataset.s);
+    const on = !grid[r][s];
+    setCell(r, s, on);
+    if (on && !playing) {
+      ensureAudio();
+      playNote(rowNote(r), performance.now() + 5, 250);   // hear the note you just placed
+    }
+  });
+
+  seq.addEventListener('keydown', e => {
+    const b = e.target.closest('.cell');
+    if (!b) return;
+    let r = Number(b.dataset.r), s = Number(b.dataset.s);
+    if (e.key === 'ArrowRight') s = Math.min(STEPS - 1, s + 1);
+    else if (e.key === 'ArrowLeft') s = Math.max(0, s - 1);
+    else if (e.key === 'ArrowUp') r = Math.min(ROWS - 1, r + 1);
+    else if (e.key === 'ArrowDown') r = Math.max(0, r - 1);
+    else return;
+    e.preventDefault();
+    b.tabIndex = -1;
+    cells[r][s].tabIndex = 0;
+    cells[r][s].focus();
+  });
+
+  $('clear').addEventListener('click', () => {
+    for (let r = 0; r < ROWS; r++) for (let s = 0; s < STEPS; s++) setCell(r, s, false);
+  });
+
+  $('random').addEventListener('click', () => {
+    for (let r = 0; r < ROWS; r++) for (let s = 0; s < STEPS; s++) setCell(r, s, false);
+    for (let s = 0; s < STEPS; s++) {
+      if (Math.random() < 0.5) setCell(Math.floor(Math.random() * ROWS), s, true);
+    }
+    setCell(0, 0, true);
+  });
+
+  tempo.addEventListener('input', () => { tempoOut.textContent = tempo.value; });
+  gate.addEventListener('input', () => { gateOut.textContent = gate.value; });
+  vel.addEventListener('input', () => { velOut.textContent = vel.value; });
+  [scaleSel, keySel, octSel].forEach(el => el.addEventListener('change', updateRows));
+
+  connectBtn.addEventListener('click', connectMidi);
+  outSel.addEventListener('change', applyOutput);
+  chSel.addEventListener('change', panic);
+
+  patchBtn.addEventListener('click', () => {
+    if (!currentOut) return;
+    const ch = Number(chSel.value) - 1;
+    const p = Math.min(128, Math.max(1, Math.round(Number(patchIn.value) || 1))) - 1;
+    sendMidi([0xC0 | ch, p], 0);
+    addLine(`Program Change  ch ${String(ch + 1).padStart(2)}  patch ${p + 1}   bytes: ${hex([0xC0 | ch, p])}`, 'pc');
+  });
+
+  window.addEventListener('pagehide', panic);
+})();
+</script>
+</body>
+</html>
