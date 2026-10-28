@@ -171,7 +171,12 @@
             <select id="out"><option value="builtin">This computer's speaker</option></select>
           </label>
           <button id="connect" class="btn" type="button">Connect MIDI devices</button>
+          <button id="connectBle" class="btn" type="button">Connect Bluetooth MIDI</button>
         </div>
+        <label class="check" for="bleAll">
+          <input id="bleAll" type="checkbox">
+          Show all nearby Bluetooth devices when searching
+        </label>
         <label class="check" for="alsoBuiltin">
           <input id="alsoBuiltin" type="checkbox" checked disabled>
           Play on this computer's speaker too
@@ -191,6 +196,9 @@
         <summary>Synth not showing up?</summary>
         <ul>
           <li>Use Chrome or Edge. Safari does not support Web MIDI.</li>
+          <li><strong>Chromebook or Bluetooth synth:</strong> use <em>Connect Bluetooth MIDI</em>. It talks to the synth directly, so it works even when the computer does not list the synth as a MIDI device. Do not pair the synth in the computer's Bluetooth settings first: many synths then show up as a Bluetooth speaker, and the computer's sound plays through them instead of MIDI notes. If it is already paired there, remove it, and make sure no other device (a phone, or another browser tab) is connected to it.</li>
+          <li>"Midi Through" is a loopback inside the computer. It goes nowhere, so it is hidden from the list.</li>
+          <li>A USB cable from the synth to the computer also works on a Chromebook.</li>
           <li>Turn the synth on first, then press Connect and allow the MIDI permission.</li>
           <li>USB-connected synths show up on most computers. For Bluetooth, pair the synth with the computer first (on a Mac, use Audio MIDI Setup, then Bluetooth). Some systems do not share Bluetooth MIDI devices with the browser.</li>
           <li>Connected but silent? Make sure the MIDI channel matches the synth. Try channel 1, then 2.</li>
@@ -240,6 +248,7 @@
   const scaleSel = $('scale'), keySel = $('key'), octSel = $('octave');
   const gate = $('gate'), gateOut = $('gateOut'), vel = $('vel'), velOut = $('velOut');
   const outSel = $('out'), connectBtn = $('connect'), alsoBuiltin = $('alsoBuiltin');
+  const connectBleBtn = $('connectBle'), bleAll = $('bleAll');
   const chSel = $('channel'), patchIn = $('patch'), patchBtn = $('sendPatch');
   const statusEl = $('status'), monitor = $('monitor'), showOff = $('showOff');
   const seq = $('seq');
@@ -357,6 +366,7 @@
   // ---------- MIDI ----------
   let midi = null;
   let currentOut = null;
+  let bleOut = null;
   let currentOutId = 'builtin';
   const sounding = new Set();
   const usedChannels = new Set();
@@ -370,6 +380,7 @@
 
   function panic() {
     if (!currentOut) { sounding.clear(); usedChannels.clear(); return; }
+    if (currentOut.cancel) currentOut.cancel();   // Bluetooth: drop anything still waiting to be sent
     const flush = t => {
       sounding.forEach(k => {
         const [ch, n] = k.split(':').map(Number);
@@ -395,7 +406,8 @@
     if (id === currentOutId) return;
     panic();
     currentOutId = id;
-    currentOut = (id !== 'builtin' && midi) ? (midi.outputs.get(id) || null) : null;
+    if (id === 'ble') currentOut = bleOut;
+    else currentOut = (id !== 'builtin' && midi) ? (midi.outputs.get(id) || null) : null;
     if (!currentOut && id !== 'builtin') { outSel.value = 'builtin'; currentOutId = 'builtin'; }
     alsoBuiltin.disabled = !currentOut;
     if (!currentOut) alsoBuiltin.checked = true;
@@ -405,20 +417,31 @@
       : "Playing through this computer's speaker.", currentOut ? 'good' : '');
   }
 
-  function refreshOutputs() {
-    if (!midi) return;
+  function rebuildOutputs() {
     const prev = outSel.value;
     outSel.innerHTML = '';
     outSel.add(new Option("This computer's speaker", 'builtin'));
-    midi.outputs.forEach(o => outSel.add(new Option(o.name || 'MIDI output', o.id)));
+    if (midi) {
+      midi.outputs.forEach(o => {
+        if (/midi through/i.test(o.name || '')) return;   // loopback, goes nowhere
+        outSel.add(new Option(o.name || 'MIDI output', o.id));
+      });
+    }
+    if (bleOut) outSel.add(new Option('Bluetooth: ' + bleOut.name, 'ble'));
     outSel.value = [...outSel.options].some(o => o.value === prev) ? prev : 'builtin';
     // If the active port vanished, applyOutput will fall back to built-in sound
     if (currentOutId !== 'builtin' && outSel.value === 'builtin') currentOutId = '__lost__';
     applyOutput();
-    if (midi.outputs.size === 0) {
-      setStatus('MIDI is connected, but no MIDI outputs were found. Turn on your synth, plug it in or pair it, then try again.', 'bad');
+  }
+
+  function refreshOutputs() {
+    if (!midi) return;
+    rebuildOutputs();
+    const count = outSel.options.length - 1;
+    if (count === 0) {
+      setStatus('MIDI is connected, but no MIDI devices were found. Turn on your synth and plug it in with USB, or press Connect Bluetooth MIDI.', 'bad');
     } else if (!currentOut) {
-      setStatus(`Found ${midi.outputs.size} MIDI output${midi.outputs.size > 1 ? 's' : ''}. Choose one under Output.`, 'good');
+      setStatus(`Found ${count} MIDI output${count > 1 ? 's' : ''}. Choose one under Output.`, 'good');
     }
   }
 
@@ -435,6 +458,99 @@
     }
     midi.onstatechange = refreshOutputs;
     refreshOutputs();
+  }
+
+  // ---------- Direct Bluetooth (Web Bluetooth) ----------
+  // Talks BLE MIDI straight to the synth, without the operating system's MIDI layer.
+  const BLE_MIDI_SERVICE = '03b80e5a-ede8-4b33-a751-6ce34ec4c700';
+  const BLE_MIDI_CHAR    = '7772e5db-3868-4112-a1a9-f2669d106bf3';
+
+  function makeBleOut(dev, chr) {
+    const queue = [];
+    const timers = new Set();
+    let busy = false;
+
+    async function pump() {
+      if (busy) return;
+      busy = true;
+      try {
+        while (queue.length) {
+          // BLE MIDI packet: [header][timestamp][msg][timestamp][msg]...  (20-byte limit)
+          const ts = Math.floor(performance.now()) & 0x1FFF;
+          const hi = 0x80 | ((ts >> 7) & 0x3F), lo = 0x80 | (ts & 0x7F);
+          const pkt = [hi, lo];
+          let first = true;
+          while (queue.length && pkt.length + queue[0].length + (first ? 0 : 1) <= 20) {
+            const m = queue.shift();
+            if (!first) pkt.push(lo);
+            pkt.push(...m);
+            first = false;
+          }
+          await chr.writeValueWithoutResponse(new Uint8Array(pkt));
+        }
+      } catch (e) { /* disconnected; the disconnect handler tells the user */ }
+      busy = false;
+    }
+
+    return {
+      dev,
+      name: dev.name || 'Bluetooth device',
+      send(bytes, tMs) {
+        const delay = (tMs || 0) - performance.now();
+        if (!tMs || delay <= 1) { queue.push(bytes); pump(); return; }
+        const id = setTimeout(() => { timers.delete(id); queue.push(bytes); pump(); }, delay);
+        timers.add(id);
+      },
+      cancel() {            // forget anything scheduled but not yet sent
+        timers.forEach(clearTimeout);
+        timers.clear();
+        queue.length = 0;
+      }
+    };
+  }
+
+  async function connectBle() {
+    if (!navigator.bluetooth) {
+      setStatus('This browser does not support Web Bluetooth. Use Chrome on a Chromebook or computer.', 'bad');
+      return;
+    }
+    let dev;
+    try {
+      const options = bleAll.checked
+        ? { acceptAllDevices: true, optionalServices: [BLE_MIDI_SERVICE] }
+        : { filters: [{ services: [BLE_MIDI_SERVICE] }, { namePrefix: 'FM' }, { namePrefix: 'M-V' }],
+            optionalServices: [BLE_MIDI_SERVICE] };
+      dev = await navigator.bluetooth.requestDevice(options);
+    } catch (e) {
+      if (e && e.name === 'NotFoundError') {
+        setStatus('No device was chosen. If your synth was not in the list, turn it on, make sure nothing else is connected to it, and try "Show all nearby Bluetooth devices".', 'bad');
+      } else {
+        setStatus('Bluetooth search failed: ' + (e && e.message ? e.message : e), 'bad');
+      }
+      return;
+    }
+    try {
+      setStatus('Connecting to ' + (dev.name || 'the device') + '...');
+      const server = await dev.gatt.connect();
+      const svc = await server.getPrimaryService(BLE_MIDI_SERVICE);
+      const chr = await svc.getCharacteristic(BLE_MIDI_CHAR);
+      try { await chr.startNotifications(); } catch (e) { /* not required for sending */ }
+
+      if (bleOut) { try { bleOut.dev.gatt.disconnect(); } catch (e) {} }
+      if (currentOutId === 'ble') currentOutId = '__replaced__';   // force applyOutput to switch to the new link
+      bleOut = makeBleOut(dev, chr);
+      dev.addEventListener('gattserverdisconnected', () => {
+        if (!bleOut || bleOut.dev !== dev) return;
+        bleOut = null;
+        rebuildOutputs();
+        setStatus('The Bluetooth device disconnected.', 'bad');
+      });
+      rebuildOutputs();
+      outSel.value = 'ble';
+      applyOutput();
+    } catch (e) {
+      setStatus('Could not connect: ' + (e && e.message ? e.message : e) + ' The device may be busy with another connection, or it may not be a BLE MIDI device.', 'bad');
+    }
   }
 
   // ---------- MIDI monitor ----------
@@ -589,6 +705,7 @@
   [scaleSel, keySel, octSel].forEach(el => el.addEventListener('change', updateRows));
 
   connectBtn.addEventListener('click', connectMidi);
+  connectBleBtn.addEventListener('click', connectBle);
   outSel.addEventListener('change', applyOutput);
   chSel.addEventListener('change', panic);
 
@@ -600,7 +717,7 @@
     addLine(`Program Change  ch ${String(ch + 1).padStart(2)}  patch ${p + 1}   bytes: ${hex([0xC0 | ch, p])}`, 'pc');
   });
 
-  window.addEventListener('pagehide', panic);
+  window.addEventListener('pagehide', () => { panic(); if (bleOut) { try { bleOut.dev.gatt.disconnect(); } catch (e) {} } });
 })();
 </script>
 </body>
